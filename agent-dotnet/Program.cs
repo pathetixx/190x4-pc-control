@@ -34,6 +34,7 @@ internal static class Program
         Directory.CreateDirectory(AppPaths.Root);
         await using var log = new AgentLog(AppPaths.Log);
         await log.WriteAsync($"Агент запущен, версия {AgentConfig.CurrentVersion}");
+        NativeActions.RecoverHiddenTaskManager();
 
         var agent = new ControlAgent(config, log);
         await agent.RunAsync();
@@ -91,7 +92,7 @@ internal static class AppPaths
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.0";
+    public const string CurrentVersion = "2.0.1";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -371,8 +372,8 @@ internal sealed class ControlAgent
     {
         switch (action)
         {
-            case "shutdown": NativeActions.Start("shutdown.exe", "/s /t 60"); break;
-            case "reboot": NativeActions.Start("shutdown.exe", "/r /t 60"); break;
+            case "shutdown": NativeActions.Start("shutdown.exe", "/s /t 60", hidden: true); break;
+            case "reboot": NativeActions.Start("shutdown.exe", "/r /t 60", hidden: true); break;
             case "hibernate": Application.SetSuspendState(PowerState.Hibernate, true, false); break;
             case "sleep": Application.SetSuspendState(PowerState.Suspend, true, false); break;
             case "lock": NativeActions.LockWorkStation(); break;
@@ -572,11 +573,26 @@ internal static class NativeActions
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
 
-    public static void Start(string file, string args = "") => Process.Start(new ProcessStartInfo(file, args)
+    public static void Start(string file, string args = "", bool hidden = false) => Process.Start(new ProcessStartInfo(file, args)
     {
         UseShellExecute = true,
-        WindowStyle = ProcessWindowStyle.Hidden
+        WindowStyle = hidden ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal
     });
+
+    public static void RecoverHiddenTaskManager()
+    {
+        var currentSession = Process.GetCurrentProcess().SessionId;
+        foreach (var process in Process.GetProcessesByName("Taskmgr"))
+        {
+            try
+            {
+                if (process.SessionId == currentSession && process.MainWindowHandle == IntPtr.Zero)
+                    process.Kill();
+            }
+            catch { }
+            finally { process.Dispose(); }
+        }
+    }
     public static void MonitorOff() => SendMessage(new IntPtr(0xffff), WmSysCommand, new IntPtr(ScMonitorPower), new IntPtr(2));
     public static void AppCommand(int command) => SendMessage(new IntPtr(0xffff), WmAppCommand, IntPtr.Zero, new IntPtr(command << 16));
     public static void Key(byte key)
