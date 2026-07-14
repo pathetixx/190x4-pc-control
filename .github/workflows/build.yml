@@ -1,0 +1,55 @@
+name: build-installer
+
+on:
+  push:
+    tags: ['v*']        # тег v* → собрать и зарелизить
+  workflow_dispatch: {} # ручной запуск без релиза (только артефакт)
+
+permissions:
+  contents: write       # для создания GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build self-contained Windows agent
+        shell: pwsh
+        run: dotnet publish .\agent-dotnet\PCControlAgent.csproj -c Release -r win-x64 --self-contained true -o .\publish
+
+      - name: Embed agent into installer.ps1
+        shell: pwsh
+        run: ./build/embed.ps1
+
+      - name: Install ps2exe
+        shell: pwsh
+        run: Install-Module ps2exe -Force -Scope CurrentUser
+
+      - name: Build PCControl-Setup.exe
+        shell: pwsh
+        run: |
+          Invoke-PS2EXE -InputFile .\installer.ps1 -OutputFile .\PCControl-Setup.exe `
+            -requireAdmin -noConsole `
+            -title "190x4 PC Control" -product "190x4 PC Control" `
+            -company "190x4" -version "2.0.0"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCControl-Setup
+          path: |
+            PCControl-Setup.exe
+            publish/PCControlAgent.exe
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PCControl-Setup.exe
+            publish/PCControlAgent.exe

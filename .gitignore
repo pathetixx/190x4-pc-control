@@ -1,0 +1,3 @@
+installer.ps1
+*.exe
+!bin/nircmd.exe
