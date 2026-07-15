@@ -92,7 +92,7 @@ internal static class AppPaths
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.1";
+    public const string CurrentVersion = "2.0.2";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -462,9 +462,11 @@ internal sealed class ControlAgent
     private async Task ObsAsync(string requestType)
     {
         var obs = new ObsClient(_config.ObsPassword);
+        var knownFiles = requestType == "SaveReplayBuffer" ? SnapshotObsFiles() : null;
+        string? outputPath;
         try
         {
-            await obs.SendAsync(requestType);
+            outputPath = await obs.SendAsync(requestType);
         }
         catch (WebSocketException) when (File.Exists(_config.ObsPath))
         {
@@ -475,7 +477,7 @@ internal sealed class ControlAgent
                 WindowStyle = ProcessWindowStyle.Minimized
             });
             await Task.Delay(TimeSpan.FromSeconds(7));
-            await obs.SendAsync(requestType);
+            outputPath = await obs.SendAsync(requestType);
         }
         await SendJsonAsync(new { type = "obs_status", status = requestType switch
         {
@@ -488,21 +490,35 @@ internal sealed class ControlAgent
         if (requestType is "StopRecord" or "SaveReplayBuffer")
         {
             await Task.Delay(TimeSpan.FromSeconds(requestType == "StopRecord" ? 4 : 6));
-            await UploadLatestObsFileAsync();
+            await UploadObsFileAsync(outputPath, knownFiles);
         }
     }
 
-    private async Task UploadLatestObsFileAsync()
+    private HashSet<string> SnapshotObsFiles()
+    {
+        var root = new DirectoryInfo(_config.ObsRecordPath);
+        if (!root.Exists) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return root.EnumerateFiles("*", SearchOption.AllDirectories)
+            .Select(file => file.FullName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task UploadObsFileAsync(string? outputPath, HashSet<string>? knownFiles)
     {
         var root = new DirectoryInfo(_config.ObsRecordPath);
         if (!root.Exists) throw new DirectoryNotFoundException("Папка записей OBS не найдена");
         var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".mp4", ".mkv", ".flv", ".mov" };
-        var file = root.EnumerateFiles("*", SearchOption.AllDirectories)
+        FileInfo? file = null;
+        if (!string.IsNullOrWhiteSpace(outputPath) && File.Exists(outputPath))
+            file = new FileInfo(outputPath);
+        file ??= root.EnumerateFiles("*", SearchOption.AllDirectories)
             .Where(value => extensions.Contains(value.Extension)
                             && value.Length > 100_000
-                            && value.LastWriteTimeUtc > DateTime.UtcNow.AddMinutes(-10))
+                            && value.LastWriteTimeUtc > DateTime.UtcNow.AddMinutes(-10)
+                            && (knownFiles == null || !knownFiles.Contains(value.FullName)))
             .OrderByDescending(value => value.LastWriteTimeUtc)
-            .FirstOrDefault() ?? throw new FileNotFoundException("Свежая запись OBS не найдена");
+            .FirstOrDefault();
+        if (file == null) throw new FileNotFoundException("Свежая запись OBS не найдена");
 
         using var upload = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_config.Server}/api/pc/v2/agent/clip");
@@ -673,10 +689,11 @@ internal sealed class ObsClient
     private readonly string _password;
     public ObsClient(string password) => _password = password;
 
-    public async Task SendAsync(string requestType)
+    public async Task<string?> SendAsync(string requestType)
     {
         using var socket = new ClientWebSocket();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(
+            requestType is "StopRecord" or "SaveReplayBuffer" ? 30 : 8));
         await socket.ConnectAsync(new Uri("ws://127.0.0.1:4455"), timeout.Token);
         var hello = await ReceiveJsonAsync(socket, timeout.Token);
         string? authentication = null;
@@ -689,15 +706,28 @@ internal sealed class ObsClient
         }
         await SendJsonAsync(socket, new { op = 1, d = new { rpcVersion = 1, authentication } }, timeout.Token);
         using var identified = await ReceiveJsonAsync(socket, timeout.Token);
+        var requestId = Guid.NewGuid().ToString();
         await SendJsonAsync(socket, new
         {
             op = 6,
-            d = new { requestType, requestId = Guid.NewGuid().ToString(), requestData = new { } }
+            d = new { requestType, requestId, requestData = new { } }
         }, timeout.Token);
-        using var response = await ReceiveJsonAsync(socket, timeout.Token);
-        var result = response.RootElement.GetProperty("d").GetProperty("requestStatus");
-        if (!result.GetProperty("result").GetBoolean())
-            throw new InvalidOperationException(result.GetProperty("comment").GetString() ?? "Ошибка OBS");
+        while (true)
+        {
+            using var response = await ReceiveJsonAsync(socket, timeout.Token);
+            var root = response.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetInt32() != 7) continue;
+            var data = root.GetProperty("d");
+            if (!data.TryGetProperty("requestId", out var responseId)
+                || responseId.GetString() != requestId) continue;
+            var result = data.GetProperty("requestStatus");
+            if (!result.GetProperty("result").GetBoolean())
+                throw new InvalidOperationException(result.GetProperty("comment").GetString() ?? "Ошибка OBS");
+            if (data.TryGetProperty("responseData", out var responseData)
+                && responseData.TryGetProperty("outputPath", out var outputPath))
+                return outputPath.GetString();
+            return null;
+        }
     }
 
     private static async Task SendJsonAsync(ClientWebSocket socket, object value, CancellationToken token)
