@@ -518,7 +518,7 @@ internal sealed class ControlAgent
                             && (knownFiles == null || !knownFiles.Contains(value.FullName)))
             .OrderByDescending(value => value.LastWriteTimeUtc)
             .FirstOrDefault();
-        file ??= throw new FileNotFoundException("Свежая запись OBS не найдена");
+        if (file == null) throw new FileNotFoundException("Свежая запись OBS не найдена");
 
         using var upload = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_config.Server}/api/pc/v2/agent/clip");
