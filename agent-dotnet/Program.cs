@@ -30,6 +30,7 @@ internal static class Program
         }
         if (config.UserId <= 0) return;
         LegacyConfigMigration.TryApply(config);
+        config.MigrateToSharedStorage();
 
         Directory.CreateDirectory(AppPaths.Root);
         await using var log = new AgentLog(AppPaths.Log);
@@ -82,17 +83,44 @@ internal static class LegacyConfigMigration
 
 internal static class AppPaths
 {
-    public static readonly string Root = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "190x4", "PCControl");
+    private static string ResolveRoot()
+    {
+        var candidates = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments),
+        };
+        foreach (var basePath in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(basePath)) continue;
+            var root = Path.Combine(basePath, "190x4", "PCControl");
+            try
+            {
+                Directory.CreateDirectory(root);
+                var probe = Path.Combine(root, ".write-test");
+                File.WriteAllText(probe, "ok");
+                File.Delete(probe);
+                return root;
+            }
+            catch { }
+        }
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "190x4", "PCControl");
+    }
+
+    public static readonly string Root = ResolveRoot();
     public static readonly string Config = Path.Combine(Root, "config.json");
     public static readonly string Log = Path.Combine(Root, "agent.log");
     public static readonly string V2Marker = Path.Combine(Root, "v2-active");
+    public static readonly string LegacyConfig = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "190x4", "PCControl", "config.json");
 }
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.2";
+    public const string CurrentVersion = "2.0.3";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -111,18 +139,21 @@ internal sealed class AgentConfig
         get
         {
             if (string.IsNullOrWhiteSpace(ProtectedToken)) return "";
-            try
+            foreach (var scope in new[] { DataProtectionScope.CurrentUser, DataProtectionScope.LocalMachine })
             {
-                var bytes = ProtectedData.Unprotect(
-                    Convert.FromBase64String(ProtectedToken), null, DataProtectionScope.CurrentUser);
-                return Encoding.UTF8.GetString(bytes);
+                try
+                {
+                    var bytes = ProtectedData.Unprotect(Convert.FromBase64String(ProtectedToken), null, scope);
+                    return Encoding.UTF8.GetString(bytes);
+                }
+                catch { }
             }
-            catch { return ""; }
+            return "";
         }
         set
         {
             var bytes = ProtectedData.Protect(
-                Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser);
+                Encoding.UTF8.GetBytes(value), null, DataProtectionScope.LocalMachine);
             ProtectedToken = Convert.ToBase64String(bytes);
         }
     }
@@ -134,9 +165,19 @@ internal sealed class AgentConfig
             if (File.Exists(AppPaths.Config))
                 return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(AppPaths.Config))
                        ?? new AgentConfig();
+            if (File.Exists(AppPaths.LegacyConfig))
+                return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(AppPaths.LegacyConfig))
+                       ?? new AgentConfig();
         }
         catch { }
         return new AgentConfig();
+    }
+
+    public void MigrateToSharedStorage()
+    {
+        var token = AgentToken;
+        if (!string.IsNullOrWhiteSpace(token)) AgentToken = token;
+        Save();
     }
 
     public void Save()
