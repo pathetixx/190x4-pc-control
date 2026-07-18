@@ -83,29 +83,17 @@ internal static class LegacyConfigMigration
 
 internal static class AppPaths
 {
+    private static string SharedRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments),
+        "190x4", "PCControl");
+
     private static string ResolveRoot()
     {
-        var candidates = new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments),
-        };
-        foreach (var basePath in candidates)
-        {
-            if (string.IsNullOrWhiteSpace(basePath)) continue;
-            var root = Path.Combine(basePath, "190x4", "PCControl");
-            try
-            {
-                Directory.CreateDirectory(root);
-                var probe = Path.Combine(root, ".write-test");
-                File.WriteAllText(probe, "ok");
-                File.Delete(probe);
-                return root;
-            }
-            catch { }
-        }
+        if (!string.IsNullOrWhiteSpace(Environment.GetFolderPath(
+                Environment.SpecialFolder.CommonDocuments)))
+            return SharedRoot;
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "190x4", "PCControl");
     }
 
@@ -116,11 +104,14 @@ internal static class AppPaths
     public static readonly string LegacyConfig = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "190x4", "PCControl", "config.json");
+    public static readonly string PreviousSharedConfig = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "190x4", "PCControl", "config.json");
 }
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.3";
+    public const string CurrentVersion = "2.0.4";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -160,16 +151,16 @@ internal sealed class AgentConfig
 
     public static AgentConfig Load()
     {
-        try
+        foreach (var path in new[] { AppPaths.Config, AppPaths.PreviousSharedConfig, AppPaths.LegacyConfig })
         {
-            if (File.Exists(AppPaths.Config))
-                return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(AppPaths.Config))
-                       ?? new AgentConfig();
-            if (File.Exists(AppPaths.LegacyConfig))
-                return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(AppPaths.LegacyConfig))
-                       ?? new AgentConfig();
+            try
+            {
+                if (File.Exists(path))
+                    return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path))
+                           ?? new AgentConfig();
+            }
+            catch { }
         }
-        catch { }
         return new AgentConfig();
     }
 
