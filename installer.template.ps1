@@ -25,6 +25,11 @@ while ($true) {
 }
 
 try {
+    $sharedDir = Join-Path ([Environment]::GetFolderPath("CommonDocuments")) "190x4\PCControl"
+    New-Item -ItemType Directory -Path $sharedDir -Force | Out-Null
+    icacls $sharedDir /inheritance:e /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось подготовить общий каталог конфигурации." }
+
     $installDir = Join-Path $env:LOCALAPPDATA "190x4\PCControl"
     $agentPath = Join-Path $installDir "PCControlAgent.exe"
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
