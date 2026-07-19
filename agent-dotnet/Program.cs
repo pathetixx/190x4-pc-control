@@ -22,11 +22,14 @@ internal static class Program
         using var mutex = new Mutex(true, "Global\\190x4_PCControlAgent", out var first);
         if (!first) return;
 
-        var config = AgentConfig.Load();
         var userArg = ReadArg(args, "--user-id");
-        if (long.TryParse(userArg, out var userId) && userId > 0)
+        var requestedUserId = long.TryParse(userArg, out var parsedUserId) && parsedUserId > 0
+            ? parsedUserId
+            : 0;
+        var config = AgentConfig.Load(requestedUserId);
+        if (requestedUserId > 0)
         {
-            config.UserId = userId;
+            config.UserId = requestedUserId;
             config.Save();
         }
         if (config.UserId <= 0) return;
@@ -158,7 +161,7 @@ internal static class AutostartMigration
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.5";
+    public const string CurrentVersion = "2.0.6";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -196,19 +199,25 @@ internal sealed class AgentConfig
         }
     }
 
-    public static AgentConfig Load()
+    public static AgentConfig Load(long preferredUserId = 0)
     {
+        AgentConfig? fallback = null;
         foreach (var path in new[] { AppPaths.Config, AppPaths.PreviousSharedConfig, AppPaths.LegacyConfig })
         {
             try
             {
-                if (File.Exists(path))
-                    return JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path))
-                           ?? new AgentConfig();
+                if (!File.Exists(path)) continue;
+                var candidate = JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path));
+                if (candidate == null) continue;
+                if (preferredUserId > 0 && candidate.UserId != preferredUserId) continue;
+                fallback ??= candidate;
+                if (!string.IsNullOrWhiteSpace(candidate.PairingSecret)
+                    || !string.IsNullOrWhiteSpace(candidate.AgentToken))
+                    return candidate;
             }
             catch { }
         }
-        return new AgentConfig();
+        return fallback ?? new AgentConfig();
     }
 
     public void MigrateToSharedStorage()
@@ -404,20 +413,44 @@ internal sealed class ControlAgent
         _socket = socket;
         await _log.WriteAsync("Защищённый канал подключён");
 
-        var buffer = new byte[256 * 1024];
-        while (socket.State == WebSocketState.Open)
+        using var updateCts = new CancellationTokenSource();
+        var updateLoop = UpdateLoopAsync(updateCts.Token);
+
+        try
         {
-            using var memory = new MemoryStream();
-            WebSocketReceiveResult result;
-            do
+            var buffer = new byte[256 * 1024];
+            while (socket.State == WebSocketState.Open)
             {
-                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-                if (result.MessageType == WebSocketMessageType.Close) return;
-                memory.Write(buffer, 0, result.Count);
-            } while (!result.EndOfMessage);
-            if (result.MessageType != WebSocketMessageType.Text) continue;
-            var json = Encoding.UTF8.GetString(memory.ToArray());
-            await HandleMessageAsync(json);
+                using var memory = new MemoryStream();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                    if (result.MessageType == WebSocketMessageType.Close) return;
+                    memory.Write(buffer, 0, result.Count);
+                } while (!result.EndOfMessage);
+                if (result.MessageType != WebSocketMessageType.Text) continue;
+                var json = Encoding.UTF8.GetString(memory.ToArray());
+                await HandleMessageAsync(json);
+            }
+        }
+        finally
+        {
+            updateCts.Cancel();
+            try { await updateLoop; }
+            catch (OperationCanceledException) { }
+            if (ReferenceEquals(_socket, socket)) _socket = null;
+        }
+    }
+
+    private async Task UpdateLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromMinutes(5), token);
+            if (DateTime.UtcNow < _nextUpdateCheck) continue;
+            _nextUpdateCheck = DateTime.UtcNow.AddHours(1);
+            await CheckForUpdateAsync();
         }
     }
 
