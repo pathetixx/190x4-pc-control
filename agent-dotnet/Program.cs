@@ -35,6 +35,7 @@ internal static class Program
         if (config.UserId <= 0) return;
         LegacyConfigMigration.TryApply(config);
         config.MigrateToSharedStorage();
+        AgentConfig.ClearUpdateSnapshot();
 
         Directory.CreateDirectory(AppPaths.Root);
         await using var log = new AgentLog(AppPaths.Log);
@@ -106,6 +107,7 @@ internal static class AppPaths
     public static readonly string Config = Path.Combine(Root, "config.json");
     public static readonly string Log = Path.Combine(Root, "agent.log");
     public static readonly string V2Marker = Path.Combine(Root, "v2-active");
+    public static readonly string UpdateSnapshot = Path.Combine(Root, "update-config.json");
     public static readonly string LegacyConfig = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "190x4", "PCControl", "config.json");
@@ -161,7 +163,7 @@ internal static class AutostartMigration
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.6";
+    public const string CurrentVersion = "2.0.7";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -201,23 +203,34 @@ internal sealed class AgentConfig
 
     public static AgentConfig Load(long preferredUserId = 0)
     {
+        AgentConfig? pairingFallback = null;
         AgentConfig? fallback = null;
-        foreach (var path in new[] { AppPaths.Config, AppPaths.PreviousSharedConfig, AppPaths.LegacyConfig })
+        foreach (var path in new[]
+        {
+            AppPaths.UpdateSnapshot,
+            AppPaths.Config,
+            AppPaths.PreviousSharedConfig,
+            AppPaths.LegacyConfig,
+        })
         {
             try
             {
                 if (!File.Exists(path)) continue;
                 var candidate = JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path));
                 if (candidate == null) continue;
-                if (preferredUserId > 0 && candidate.UserId != preferredUserId) continue;
+                if (preferredUserId > 0 && candidate.UserId > 0 && candidate.UserId != preferredUserId)
+                    continue;
+                if (candidate.UserId <= 0 && preferredUserId > 0)
+                    candidate.UserId = preferredUserId;
                 fallback ??= candidate;
-                if (!string.IsNullOrWhiteSpace(candidate.PairingSecret)
-                    || !string.IsNullOrWhiteSpace(candidate.AgentToken))
+                if (!string.IsNullOrWhiteSpace(candidate.AgentToken))
                     return candidate;
+                if (pairingFallback == null && !string.IsNullOrWhiteSpace(candidate.PairingSecret))
+                    pairingFallback = candidate;
             }
             catch { }
         }
-        return fallback ?? new AgentConfig();
+        return pairingFallback ?? fallback ?? new AgentConfig();
     }
 
     public void MigrateToSharedStorage()
@@ -233,6 +246,12 @@ internal sealed class AgentConfig
         var temp = AppPaths.Config + ".tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(this, JsonOptions.Indented));
         File.Move(temp, AppPaths.Config, true);
+    }
+
+    public static void ClearUpdateSnapshot()
+    {
+        try { File.Delete(AppPaths.UpdateSnapshot); }
+        catch { }
     }
 }
 
@@ -335,6 +354,13 @@ internal sealed class ControlAgent
 
             var currentPath = Environment.ProcessPath ?? throw new InvalidOperationException("Путь агента не найден");
             var nextPath = Path.Combine(AppPaths.Root, "PCControlAgent.next.exe");
+            var snapshotPath = AppPaths.UpdateSnapshot;
+            var snapshotTempPath = snapshotPath + ".tmp";
+            await File.WriteAllTextAsync(
+                snapshotTempPath,
+                JsonSerializer.Serialize(_config, JsonOptions.Indented),
+                Encoding.UTF8);
+            File.Move(snapshotTempPath, snapshotPath, true);
             await File.WriteAllBytesAsync(nextPath, bytes);
             var script = Path.Combine(AppPaths.Root, "apply-update.ps1");
             var ps = $"Start-Sleep -Seconds 2; Move-Item -LiteralPath '{nextPath.Replace("'", "''")}' "
