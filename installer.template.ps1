@@ -43,12 +43,14 @@ try {
 
     schtasks /delete /tn "PC Control Bot" /f 2>$null | Out-Null
     schtasks /delete /tn "190x4 PC Control" /f 2>$null | Out-Null
-    $taskCommand = '"' + $agentPath + '" --user-id ' + $userId
-    schtasks /create /tn "190x4 PC Control" /tr $taskCommand /sc ONLOGON /rl LIMITED /it /f | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось создать задачу автозапуска." }
+
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    New-Item -Path $runKey -Force | Out-Null
+    $runCommand = '"' + $agentPath + '" --user-id ' + $userId
+    New-ItemProperty -Path $runKey -Name "190x4 PC Control" -Value $runCommand -PropertyType String -Force | Out-Null
 
     Start-Process $agentPath -ArgumentList "--user-id", $userId
-    Show-Info "Готово! ✅`n`nАгент установлен и запущен.`n`nСейчас открой Telegram: бот пришлёт запрос подключения этого ПК. Сверь код и нажми «Подключить»."
+    Show-Info "Готово! ✅`n`nАгент установлен и запущен.`nПосле входа в Windows он будет запускаться автоматически.`n`nСейчас открой Telegram: бот пришлёт запрос подключения этого ПК. Сверь код и нажми «Подключить»."
 }
 catch {
     Show-Err "Установка не завершена:`n`n$($_.Exception.Message)"

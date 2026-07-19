@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace PCControlAgent;
 
@@ -35,6 +36,7 @@ internal static class Program
         Directory.CreateDirectory(AppPaths.Root);
         await using var log = new AgentLog(AppPaths.Log);
         await log.WriteAsync($"Агент запущен, версия {AgentConfig.CurrentVersion}");
+        AutostartMigration.Ensure(config.UserId, log);
         NativeActions.RecoverHiddenTaskManager();
 
         var agent = new ControlAgent(config, log);
@@ -109,9 +111,54 @@ internal static class AppPaths
         "190x4", "PCControl", "config.json");
 }
 
+internal static class AutostartMigration
+{
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunValue = "190x4 PC Control";
+
+    public static void Ensure(long userId, AgentLog log)
+    {
+        try
+        {
+            var executable = Environment.ProcessPath;
+            if (userId <= 0 || string.IsNullOrWhiteSpace(executable)) return;
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            key?.SetValue(RunValue, $"\"{executable}\" --user-id {userId}", RegistryValueKind.String);
+        }
+        catch (Exception ex)
+        {
+            log.WriteAsync($"Автозапуск: {ex.Message}").GetAwaiter().GetResult();
+        }
+
+        DeleteLegacyTask("PC Control Bot", log);
+        DeleteLegacyTask("190x4 PC Control", log);
+    }
+
+    private static void DeleteLegacyTask(string taskName, AgentLog log)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = $"/delete /tn \"{taskName}\" /f",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            process?.WaitForExit(5000);
+        }
+        catch (Exception ex)
+        {
+            log.WriteAsync($"Удаление старой задачи: {ex.Message}").GetAwaiter().GetResult();
+        }
+    }
+}
+
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.4";
+    public const string CurrentVersion = "2.0.5";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
