@@ -22,6 +22,8 @@ internal static class Program
         using var mutex = new Mutex(true, "Global\\190x4_PCControlAgent", out var first);
         if (!first) return;
 
+        AutostartMigration.CleanupLegacyTasks();
+
         var userArg = ReadArg(args, "--user-id");
         var requestedUserId = long.TryParse(userArg, out var parsedUserId) && parsedUserId > 0
             ? parsedUserId
@@ -121,6 +123,12 @@ internal static class AutostartMigration
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "190x4 PC Control";
 
+    public static void CleanupLegacyTasks()
+    {
+        DeleteLegacyTask("PC Control Bot", null);
+        DeleteLegacyTask("190x4 PC Control", null);
+    }
+
     public static void Ensure(long userId, AgentLog log)
     {
         try
@@ -139,7 +147,7 @@ internal static class AutostartMigration
         DeleteLegacyTask("190x4 PC Control", log);
     }
 
-    private static void DeleteLegacyTask(string taskName, AgentLog log)
+    private static void DeleteLegacyTask(string taskName, AgentLog? log)
     {
         try
         {
@@ -156,14 +164,15 @@ internal static class AutostartMigration
         }
         catch (Exception ex)
         {
-            log.WriteAsync($"Удаление старой задачи: {ex.Message}").GetAwaiter().GetResult();
+            if (log != null)
+                log.WriteAsync($"Удаление старой задачи: {ex.Message}").GetAwaiter().GetResult();
         }
     }
 }
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.7";
+    public const string CurrentVersion = "2.0.8";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
