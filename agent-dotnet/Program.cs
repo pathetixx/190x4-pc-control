@@ -30,11 +30,11 @@ internal static class Program
             : 0;
         var config = AgentConfig.Load(requestedUserId);
         if (requestedUserId > 0)
-        {
             config.UserId = requestedUserId;
-            config.Save();
-        }
         if (config.UserId <= 0) return;
+        config.DeviceName = Environment.MachineName;
+        config.MachineId = MachineIdentity.Get();
+        config.Save();
         LegacyConfigMigration.TryApply(config);
         config.MigrateToSharedStorage();
         AgentConfig.ClearUpdateSnapshot();
@@ -117,6 +117,26 @@ internal static class AppPaths
         "190x4", "PCControl", "update-config.json");
 }
 
+internal static class MachineIdentity
+{
+    private const string MachineGuidKey = @"SOFTWARE\Microsoft\Cryptography";
+
+    public static string Get()
+    {
+        string seed = Environment.MachineName;
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(MachineGuidKey);
+            var machineGuid = key?.GetValue("MachineGuid")?.ToString();
+            if (!string.IsNullOrWhiteSpace(machineGuid)) seed += "|" + machineGuid;
+        }
+        catch { }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(seed)))
+            .ToLowerInvariant();
+    }
+}
+
 internal static class AutostartMigration
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -171,10 +191,11 @@ internal static class AutostartMigration
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.9";
+    public const string CurrentVersion = "2.0.10";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
+    public string MachineId { get; set; } = MachineIdentity.Get();
     public string Server { get; set; } = "https://190x4.pw";
     public string ProtectedToken { get; set; } = "";
     public string PairingSecret { get; set; } = "";
@@ -203,10 +224,22 @@ internal sealed class AgentConfig
         }
         set
         {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                ProtectedToken = "";
+                return;
+            }
             var bytes = ProtectedData.Protect(
                 Encoding.UTF8.GetBytes(value), null, DataProtectionScope.LocalMachine);
             ProtectedToken = Convert.ToBase64String(bytes);
         }
+    }
+
+    public void ClearSession()
+    {
+        AgentToken = "";
+        PairingSecret = "";
+        PairingCode = "";
     }
 
     public static AgentConfig Load(long preferredUserId = 0)
@@ -329,13 +362,23 @@ internal sealed class ControlAgent
                     _nextUpdateCheck = DateTime.UtcNow.AddHours(1);
                     await CheckForUpdateAsync();
                 }
-                if (string.IsNullOrWhiteSpace(_config.AgentToken))
+                if (!string.IsNullOrWhiteSpace(_config.AgentToken))
+                {
+                    var tokenState = await CheckTokenAsync();
+                    if (tokenState == false)
+                    {
+                        _config.ClearSession();
+                        _config.Save();
+                        await _log.WriteAsync("Старый ключ отклонён сервером, запускается безопасное восстановление");
+                        await Task.Delay(TimeSpan.FromSeconds(2));
+                        continue;
+                    }
+                    await RunSocketAsync();
+                }
+                else
                 {
                     await EnsureEnrolledAsync();
-                    await Task.Delay(TimeSpan.FromSeconds(5));
-                    continue;
                 }
-                await RunSocketAsync();
             }
             catch (Exception ex)
             {
@@ -343,6 +386,24 @@ internal sealed class ControlAgent
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
         }
+    }
+
+    private async Task<bool?> CheckTokenAsync()
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get, $"{_config.Server}/api/pc/v2/agent/ping");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _config.AgentToken);
+        try
+        {
+            using var response = await _http.SendAsync(request);
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized
+                or System.Net.HttpStatusCode.Forbidden)
+                return false;
+            if (response.IsSuccessStatusCode) return true;
+            return null;
+        }
+        catch (HttpRequestException) { return null; }
+        catch (TaskCanceledException) { return null; }
     }
 
     private async Task CheckForUpdateAsync()
@@ -399,14 +460,34 @@ internal sealed class ControlAgent
                 user_id = _config.UserId,
                 device_id = _config.DeviceId,
                 device_name = _config.DeviceName,
+                machine_id = _config.MachineId,
                 version = AgentConfig.CurrentVersion
             });
             using var response = await _http.PostAsync(
                 $"{_config.Server}/api/pc/v2/enroll/start",
                 new StringContent(payload, Encoding.UTF8, "application/json"));
+            if ((int)response.StatusCode == 409)
+            {
+                await _log.WriteAsync("Сервер сообщает, что сопряжение уже активно; повторная попытка без нового запроса");
+                return;
+            }
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Сопряжение: HTTP {(int)response.StatusCode}");
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (doc.RootElement.TryGetProperty("agent_token", out var directTokenNode))
+            {
+                var directToken = directTokenNode.GetString();
+                if (!string.IsNullOrWhiteSpace(directToken))
+                {
+                    _config.AgentToken = directToken;
+                    _config.PairingSecret = "";
+                    _config.PairingCode = "";
+                    _config.Save();
+                    File.WriteAllText(AppPaths.V2Marker, DateTime.UtcNow.ToString("O"));
+                    await _log.WriteAsync("Сопряжение восстановлено, защищённый канал активирован");
+                    return;
+                }
+            }
             _config.PairingSecret = doc.RootElement.GetProperty("pairing_secret").GetString() ?? "";
             _config.PairingCode = doc.RootElement.GetProperty("pairing_code").GetString() ?? "";
             _config.Save();
@@ -419,7 +500,9 @@ internal sealed class ControlAgent
             $"{_config.Server}/api/pc/v2/enroll/status?device_id={Uri.EscapeDataString(_config.DeviceId)}");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _config.PairingSecret);
         using var responseStatus = await _http.SendAsync(request);
-        if ((int)responseStatus.StatusCode == 410)
+        if (responseStatus.StatusCode is System.Net.HttpStatusCode.Unauthorized
+            or System.Net.HttpStatusCode.Forbidden
+            or System.Net.HttpStatusCode.Gone)
         {
             _config.PairingSecret = "";
             _config.PairingCode = "";
@@ -428,7 +511,18 @@ internal sealed class ControlAgent
         }
         if (!responseStatus.IsSuccessStatusCode) return;
         using var statusDoc = JsonDocument.Parse(await responseStatus.Content.ReadAsStringAsync());
-        if (!statusDoc.RootElement.TryGetProperty("agent_token", out var tokenNode)) return;
+        if (!statusDoc.RootElement.TryGetProperty("agent_token", out var tokenNode))
+        {
+            if (statusDoc.RootElement.TryGetProperty("status", out var statusNode)
+                && string.Equals(statusNode.GetString(), "approved", StringComparison.OrdinalIgnoreCase))
+            {
+                _config.PairingSecret = "";
+                _config.PairingCode = "";
+                _config.Save();
+                await _log.WriteAsync("Сопряжение подтверждено без ключа, запрашивается безопасная повторная выдача");
+            }
+            return;
+        }
         var token = tokenNode.GetString();
         if (string.IsNullOrWhiteSpace(token)) return;
         _config.AgentToken = token;

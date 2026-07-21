@@ -27,12 +27,9 @@ while ($true) {
 try {
     $publicRoot = $env:PUBLIC
     if ([string]::IsNullOrWhiteSpace($publicRoot)) {
-        $publicRoot = [Environment]::GetFolderPath("CommonDocuments")
-        $sharedDir = Join-Path $publicRoot "190x4\PCControl"
+        $publicRoot = "C:\Users\Public"
     }
-    else {
-        $sharedDir = Join-Path $publicRoot "Documents\190x4\PCControl"
-    }
+    $sharedDir = Join-Path $publicRoot "Documents\190x4\PCControl"
     New-Item -ItemType Directory -Path $sharedDir -Force | Out-Null
     icacls $sharedDir /inheritance:e /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Не удалось подготовить общий каталог конфигурации." }
