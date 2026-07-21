@@ -91,21 +91,14 @@ internal static class LegacyConfigMigration
 
 internal static class AppPaths
 {
-    private static string SharedRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments),
-        "190x4", "PCControl");
-
-    private static string ResolveRoot()
+    private static string ResolvePublicRoot()
     {
-        if (!string.IsNullOrWhiteSpace(Environment.GetFolderPath(
-                Environment.SpecialFolder.CommonDocuments)))
-            return SharedRoot;
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "190x4", "PCControl");
+        var publicRoot = Environment.GetEnvironmentVariable("PUBLIC");
+        if (string.IsNullOrWhiteSpace(publicRoot)) publicRoot = @"C:\Users\Public";
+        return Path.Combine(publicRoot, "Documents", "190x4", "PCControl");
     }
 
-    public static readonly string Root = ResolveRoot();
+    public static readonly string Root = ResolvePublicRoot();
     public static readonly string Config = Path.Combine(Root, "config.json");
     public static readonly string Log = Path.Combine(Root, "agent.log");
     public static readonly string V2Marker = Path.Combine(Root, "v2-active");
@@ -113,9 +106,15 @@ internal static class AppPaths
     public static readonly string LegacyConfig = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "190x4", "PCControl", "config.json");
+    public static readonly string LegacySnapshot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "190x4", "PCControl", "update-config.json");
     public static readonly string PreviousSharedConfig = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "190x4", "PCControl", "config.json");
+    public static readonly string PreviousSharedSnapshot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "190x4", "PCControl", "update-config.json");
 }
 
 internal static class AutostartMigration
@@ -172,7 +171,7 @@ internal static class AutostartMigration
 
 internal sealed class AgentConfig
 {
-    public const string CurrentVersion = "2.0.8";
+    public const string CurrentVersion = "2.0.9";
     public long UserId { get; set; }
     public string DeviceId { get; set; } = Guid.NewGuid().ToString();
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -216,10 +215,12 @@ internal sealed class AgentConfig
         AgentConfig? fallback = null;
         foreach (var path in new[]
         {
-            AppPaths.UpdateSnapshot,
             AppPaths.Config,
+            AppPaths.UpdateSnapshot,
             AppPaths.PreviousSharedConfig,
+            AppPaths.PreviousSharedSnapshot,
             AppPaths.LegacyConfig,
+            AppPaths.LegacySnapshot,
         })
         {
             try

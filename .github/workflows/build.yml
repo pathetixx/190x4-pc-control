@@ -36,7 +36,7 @@ jobs:
           Invoke-PS2EXE -InputFile .\installer.ps1 -OutputFile .\PCControl-Setup.exe `
             -noConsole `
             -title "190x4 PC Control" -product "190x4 PC Control" `
-            -company "190x4" -version "2.0.8"
+            -company "190x4" -version "2.0.9"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
